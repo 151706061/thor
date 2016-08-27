@@ -69,16 +69,16 @@ static const int8_t filter_coeffsC[8][4] = {
     {-2, 10, 58, -2}
 };
 
-void clip_mv(mv_t *mv_cand, int ypos, int xpos, int fwidth, int fheight, int size, int sign) {
+void clip_mv(mv_t *mv_cand, int ypos, int xpos, int fwidth, int fheight, int bwidth, int bheight, int sign) {
 
   int max_mv_ext = PADDING_Y - 16; //max MV extension outside frame boundaries in integer pixel resolution
   int mvy, mvx;
   mvy = sign ? -mv_cand->y : mv_cand->y;
   mvx = sign ? -mv_cand->x : mv_cand->x;
   if (ypos + mvy / 4 < -max_mv_ext) mvy = 4 * (-max_mv_ext - ypos);
-  if (ypos + mvy / 4 + size > fheight + max_mv_ext) mvy = 4 * (fheight + max_mv_ext - ypos - size);
+  if (ypos + mvy / 4 + bheight > fheight + max_mv_ext) mvy = 4 * (fheight + max_mv_ext - ypos - bheight);
   if (xpos + mvx / 4 < -max_mv_ext) mvx = 4 * (-max_mv_ext - xpos);
-  if (xpos + mvx / 4 > fwidth + max_mv_ext) mvx = 4 * (fwidth + max_mv_ext - xpos - size);
+  if (xpos + mvx / 4 + bwidth > fwidth + max_mv_ext) mvx = 4 * (fwidth + max_mv_ext - xpos - bwidth);
   mv_cand->y = sign ? -mvy : mvy;
   mv_cand->x = sign ? -mvx : mvx;
 }
@@ -150,7 +150,7 @@ void get_inter_prediction_luma(uint8_t *pblock, uint8_t *ref, int width, int hei
   ver_int = max(ver_int,-xpos-height);
   hor_int = min(hor_int,pic_width-xpos);
   hor_int = max(hor_int,-xpos-width);
-  int32_t tmp[MAX_BLOCK_SIZE+16][MAX_BLOCK_SIZE + 16]; //7-bit filter exceeds 16 bit temporary storage
+  int32_t tmp[MAX_SB_SIZE+16][MAX_SB_SIZE + 16]; //7-bit filter exceeds 16 bit temporary storage
   /* Integer position */
   if (ver_frac==0 && hor_frac==0){
     j_off = 0 + hor_int;
@@ -201,10 +201,67 @@ void get_inter_prediction_luma(uint8_t *pblock, uint8_t *ref, int width, int hei
   }
 }
 
-mv_t get_mv_pred(int ypos,int xpos,int width,int height,int size,int ref_idx,deblock_data_t *deblock_data) //TODO: Remove ref_idx as argument if not needed
+void get_inter_prediction_yuv(yuv_frame_t *ref, uint8_t *pblock_y, uint8_t *pblock_u, uint8_t *pblock_v, block_pos_t *block_pos, mv_t *mv_arr, int sign, int width, int height, int enable_bipred, int split) {
+  mv_t mv;
+  int div = split + 1;
+
+  int bwidth = block_pos->bwidth / div;
+  int bheight = block_pos->bheight / div;
+  int pstride = block_pos->size;
+  int rstride_y = ref->stride_y;
+  int rstride_c = ref->stride_c;
+  int index;
+  int yposY = block_pos->ypos;
+  int xposY = block_pos->xpos;
+  int yposC = yposY / 2;
+  int xposC = xposY / 2;
+
+  int ref_posY = yposY*ref->stride_y + xposY;
+  int ref_posC = yposC*ref->stride_c + xposC;
+  uint8_t *ref_y = ref->y + ref_posY;
+  uint8_t *ref_u = ref->u + ref_posC;
+  uint8_t *ref_v = ref->v + ref_posC;
+  for (index = 0; index<div*div; index++) {
+    int idx = (index >> 0) & 1;
+    int idy = (index >> 1) & 1;
+    int offsetpY = idy*bheight*pstride + idx*bwidth;
+    int offsetpC = idy*bheight*pstride / 4 + idx*bwidth / 2;
+    int offsetrY = idy*bheight*rstride_y + idx*bwidth;
+    int offsetrC = idy*bheight*rstride_c / 2 + idx*bwidth / 2;
+    mv = mv_arr[index];
+    clip_mv(&mv, yposY, xposY, width, height, bwidth, bheight, sign);
+    get_inter_prediction_luma(pblock_y + offsetpY, ref_y + offsetrY, bwidth, bheight, rstride_y, pstride, &mv, sign, enable_bipred, width, height, xposY, yposY); //get_inter_prediction_yuv()
+    get_inter_prediction_chroma(pblock_u + offsetpC, ref_u + offsetrC, bwidth / 2, bheight / 2, rstride_c, pstride / 2, &mv, sign, width / 2, height / 2, xposC, yposC);
+    get_inter_prediction_chroma(pblock_v + offsetpC, ref_v + offsetrC, bwidth / 2, bheight / 2, rstride_c, pstride / 2, &mv, sign, width / 2, height / 2, xposC, yposC);
+  }
+}
+
+void average_blocks_all(uint8_t *rec_y, uint8_t *rec_u, uint8_t *rec_v, uint8_t *pblock0_y, uint8_t *pblock0_u, uint8_t *pblock0_v, uint8_t *pblock1_y, uint8_t *pblock1_u, uint8_t *pblock1_v, block_pos_t *block_pos) {
+  int bwidth = block_pos->bwidth;
+  int bheight = block_pos->bheight;
+  int size = block_pos->size;
+  int sizeY = size;
+  int sizeC = size / 2;
+  int i, j;
+
+  for (i = 0; i < bheight; i++) {
+    for (j = 0; j < bwidth; j++) {
+      rec_y[i*sizeY + j] = (uint8_t)(((int)pblock0_y[i*sizeY + j] + (int)pblock1_y[i*sizeY + j]) >> 1);
+    }
+  }
+  for (i = 0; i < bheight / 2; i++) {
+    for (j = 0; j < bwidth / 2; j++) {
+      rec_u[i*sizeC + j] = (uint8_t)(((int)pblock0_u[i*sizeC + j] + (int)pblock1_u[i*sizeC + j]) >> 1);
+      rec_v[i*sizeC + j] = (uint8_t)(((int)pblock0_v[i*sizeC + j] + (int)pblock1_v[i*sizeC + j]) >> 1);
+    }
+  }
+}
+
+mv_t get_mv_pred(int ypos,int xpos,int width,int height,int bwidth, int bheight, int sb_size,int ref_idx,deblock_data_t *deblock_data) //TODO: Remove ref_idx as argument if not needed
 {
   mv_t mvp, mva, mvb, mvc;
   inter_pred_t zero_pred, inter_predA, inter_predB, inter_predC;
+  int size = max(bwidth, bheight);
 
   /* Initialize zero unipred structure */
   zero_pred.mv0.x = 0;
@@ -237,11 +294,11 @@ mv_t get_mv_pred(int ypos,int xpos,int width,int height,int size,int ref_idx,deb
   int upright_index = block_index - block_stride + block_size;
   int upleft_index = block_index - block_stride - 1;
 
-   /* Determine availability */
-  int up_available = get_up_available(ypos,xpos,size,width);
-  int left_available = get_left_available(ypos,xpos,size,width);
-  int upright_available = get_upright_available(ypos,xpos,size,width);
-  int downleft_available = get_downleft_available(ypos,xpos,size,height);
+  /* Determine availability */
+  int up_available = get_up_available(ypos, xpos, bwidth, bheight, width, height, sb_size);
+  int left_available = get_left_available(ypos, xpos, bwidth, bheight, width, height, sb_size);
+  int upright_available = get_upright_available(ypos, xpos, bwidth, bheight, width, height, sb_size);
+  int downleft_available = get_downleft_available(ypos, xpos, bwidth, bheight, width, height, sb_size);
 
   int U = up_available;
   int UR = upright_available;
@@ -315,12 +372,13 @@ mv_t get_mv_pred(int ypos,int xpos,int width,int height,int size,int ref_idx,deb
   return mvp;
 }
 
-int get_mv_merge(int yposY, int xposY, int width, int height, int size, deblock_data_t *deblock_data, inter_pred_t *merge_candidates)
+int get_mv_merge(int yposY, int xposY, int width, int height, int bwidth, int bheight, int sb_size, deblock_data_t *deblock_data, inter_pred_t *merge_candidates)
 {
   int num_merge_vec = 0;
   int i, idx, duplicate;
   inter_pred_t zero_pred;
   inter_pred_t tmp_merge_candidates[MAX_NUM_SKIP];
+  int size = max(bwidth, bheight);
 
   /* Initialize zero unipred structure */
   zero_pred.mv0.x = 0;
@@ -346,9 +404,10 @@ int get_mv_merge(int yposY, int xposY, int width, int height, int size, deblock_
   int upright_index = block_index - block_stride + block_size;
 
   /* Determine availability */
-  int up_available = get_up_available(yposY, xposY, size, width);
-  int left_available = get_left_available(yposY, xposY, size, width);
-  int upright_available = get_upright_available(yposY, xposY, size, width);
+  int up_available = get_up_available(yposY, xposY, bwidth, bheight, width, height, sb_size);
+  int left_available = get_left_available(yposY, xposY, bwidth, bheight, width, height, sb_size);
+  int upright_available = get_upright_available(yposY, xposY, bwidth, bheight, width, height, sb_size);
+  //int downleft_available = get_downleft_available(yposY, xposY, bwidth, bheight, width, height, sb_size);
 
 #if LIMITED_SKIP
   /* Special case for rectangular skip blocks at frame boundaries */
@@ -373,8 +432,7 @@ int get_mv_merge(int yposY, int xposY, int width, int height, int size, deblock_
   int left_index1 = block_index + block_stride*((block_size - 1) / 2) - 1;
   int upleft_index = block_index - block_stride - 1;
   int downleft_index = block_index + block_stride*block_size - 1;
-  int downleft_available = get_downleft_available(yposY, xposY, size, height);
-
+  //int downleft_available = get_downleft_available(yposY, xposY, size, height, sb_size);
   /* Special case for rectangular skip blocks at frame boundaries */
   if (yposY + size > height) {
     left_index1 = left_index2 = left_index0;
@@ -468,12 +526,13 @@ int get_mv_merge(int yposY, int xposY, int width, int height, int size, deblock_
   return num_merge_vec;
 }
 
-int get_mv_skip(int yposY, int xposY, int width, int height, int size, deblock_data_t *deblock_data, inter_pred_t *skip_candidates, int bipred_copy)
+int get_mv_skip(int yposY, int xposY, int width, int height, int bwidth, int bheight, int sb_size, deblock_data_t *deblock_data, inter_pred_t *skip_candidates)
 {
   int num_skip_vec=0;
   int i,idx,duplicate;
   inter_pred_t zero_pred;
   inter_pred_t tmp_skip_candidates[MAX_NUM_SKIP];
+  int size = max(bwidth, bheight);
 
   /* Initialize zero unipred structure */
   zero_pred.mv0.x = 0;
@@ -499,9 +558,10 @@ int get_mv_skip(int yposY, int xposY, int width, int height, int size, deblock_d
   int upright_index = block_index - block_stride + block_size;
 
   /* Determine availability */
-  int up_available = get_up_available(yposY,xposY,size,width);
-  int left_available = get_left_available(yposY,xposY,size,width);
-  int upright_available = get_upright_available(yposY,xposY,size,width);
+  int up_available = get_up_available(yposY, xposY, bwidth, bheight, width, height, sb_size);
+  int left_available = get_left_available(yposY, xposY, bwidth, bheight, width, height, sb_size);
+  int upright_available = get_upright_available(yposY, xposY, bwidth, bheight, width, height, sb_size);
+  //int downleft_available = get_downleft_available(yposY, xposY, bwidth, bheight, width, height, sb_size);
 
 #if LIMITED_SKIP
   /* Special case for rectangular skip blocks at frame boundaries */
@@ -526,8 +586,7 @@ int get_mv_skip(int yposY, int xposY, int width, int height, int size, deblock_d
   int left_index1 = block_index + block_stride*((block_size - 1) / 2) - 1;
   int upleft_index = block_index - block_stride - 1;
   int downleft_index = block_index + block_stride*block_size - 1;
-  int downleft_available = get_downleft_available(yposY, xposY, size, height);
-
+  //int downleft_available = get_downleft_available(yposY, xposY, size, height, sb_size);
   /* Special case for rectangular skip blocks at frame boundaries */
   if (yposY + size > height) {
     left_index1 = left_index2 = left_index0;

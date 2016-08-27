@@ -31,6 +31,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "encode_block.h"
 #include "common_block.h"
 #include "common_frame.h"
+#include "putvlc.h"
 #include "wt_matrix.h"
 #include "enc_kernels.h"
 
@@ -44,23 +45,117 @@ const double squared_lambda_QP [52] = {
     1717.4389, 2179.0763, 2764.7991, 3507.9607, 4450.8797, 5647.2498, 7165.1970
 };
 
-static int clpf_true(int k, int l, yuv_frame_t *r, yuv_frame_t *o, const deblock_data_t *d, int s, void *stream) {
+static int clpf_true(int k, int l, yuv_frame_t *r, yuv_frame_t *o, const deblock_data_t *d, int s, int w, int h, void *stream, unsigned int strength, unsigned int fb_size_log2) {
   return 1;
 }
 
-static int clpf_decision(int k, int l, yuv_frame_t *rec, yuv_frame_t *org, const deblock_data_t *deblock_data, int block_size, void *stream) {
-    int sum0 = 0, sum1 = 0;
-  for (int m=0;m<MAX_BLOCK_SIZE/block_size;m++){
-    for (int n=0;n<MAX_BLOCK_SIZE/block_size;n++){
-      int xpos = l*MAX_BLOCK_SIZE + n*block_size;
-      int ypos = k*MAX_BLOCK_SIZE + m*block_size;
-      int index = (ypos/MIN_PB_SIZE)*(rec->width/MIN_PB_SIZE) + (xpos/MIN_PB_SIZE);
-      if (deblock_data[index].cbp.y && deblock_data[index].mode != MODE_BIPRED)
-        (use_simd ? detect_clpf_simd : detect_clpf)(rec->y,org->y,xpos,ypos,rec->width,rec->height,org->stride_y,rec->stride_y,&sum0,&sum1);
+static int clpf_decision(int k, int l, yuv_frame_t *rec, yuv_frame_t *org, const deblock_data_t *deblock_data, int block_size, int w, int h, void *stream, unsigned int strength, unsigned int fb_size_log2) {
+  int sum0 = 0, sum1 = 0;
+  for (int m = 0; m < h; m++) {
+    for (int n = 0; n < w; n++) {
+      int xpos = (l<<fb_size_log2) + n*block_size;
+      int ypos = (k<<fb_size_log2) + m*block_size;
+      int index = (ypos / MIN_PB_SIZE)*(rec->width / MIN_PB_SIZE) + (xpos / MIN_PB_SIZE);
+      if (deblock_data[index].mode != MODE_SKIP)
+        (use_simd ? detect_clpf_simd : detect_clpf)(rec->y, org->y, xpos, ypos, rec->width, rec->height, org->stride_y, rec->stride_y, &sum0, &sum1, strength);
     }
   }
-  putbits(1, sum1 < sum0, (stream_t*)stream);
+  put_flc(1, sum1 < sum0, (stream_t*)stream);
   return sum1 < sum0;
+}
+
+// Calculate the square error of all filter settings.  Result:
+// res[0][0]   : unfiltered
+// res[0][1-3] : strength=1,2,4, no signals
+// res[1][0]   : (bit count, fb size = 128)
+// res[1][1-3] : strength=1,2,4, fb size = 128
+// res[2][0]   : (bit count, fb size = 64)
+// res[2][1-3] : strength=1,2,4, fb size = 64
+// res[3][0]   : (bit count, fb size = 32)
+// res[3][1-3] : strength=1,2,4, fb size = 32
+static int clpf_rdo(int y, int x, yuv_frame_t *rec, yuv_frame_t *org, const deblock_data_t *deblock_data, unsigned int block_size, unsigned int fb_size_log2, int w, int h, int64_t res[4][4]) {
+  int filtered = 0;
+  int sum[4];
+  int bslog = log2i(block_size);
+  sum[0] = sum[1] = sum[2] = sum[3] = 0;
+  if (fb_size_log2 > log2i(MAX_SB_SIZE) - 3) {
+    fb_size_log2--;
+    int w1 = min(1<<(fb_size_log2-bslog), w);
+    int h1 = min(1<<(fb_size_log2-bslog), h);
+    int w2 = min(w - (1<<(fb_size_log2-bslog)), w>>1);
+    int h2 = min(h - (1<<(fb_size_log2-bslog)), h>>1);
+    int i = log2i(MAX_SB_SIZE) - fb_size_log2;
+    int sum1 = res[i][1], sum2 = res[i][2], sum3 = res[i][3];
+    int oldfiltered = res[i][0];
+    res[i][0] = 0;
+
+    filtered = clpf_rdo(y, x, rec, org, deblock_data, block_size, fb_size_log2, w1, h1, res);
+    if (1<<(fb_size_log2-bslog) < w)
+      filtered |= clpf_rdo(y, x+(1<<fb_size_log2), rec, org, deblock_data, block_size, fb_size_log2, w2, h1, res);
+    if (1<<(fb_size_log2-bslog) < h) {
+      filtered |= clpf_rdo(y+(1<<fb_size_log2), x, rec, org, deblock_data, block_size, fb_size_log2, w1, h2, res);
+      filtered |= clpf_rdo(y+(1<<fb_size_log2), x+(1<<fb_size_log2), rec, org, deblock_data, block_size, fb_size_log2, w2, h2, res);
+    }
+
+    res[i][1] = min(sum1 + res[i][0], res[i][1]);
+    res[i][2] = min(sum2 + res[i][0], res[i][2]);
+    res[i][3] = min(sum3 + res[i][0], res[i][3]);
+    res[i][0] = oldfiltered + filtered; // Number of signal bits
+    return filtered;
+  }
+
+  for (int m = 0; m < h; m++) {
+    for (int n = 0; n < w; n++) {
+      int xpos = x + n*block_size;
+      int ypos = y + m*block_size;
+      int index = (ypos / MIN_PB_SIZE)*(rec->width / MIN_PB_SIZE) + (xpos / MIN_PB_SIZE);
+      if (deblock_data[index].mode != MODE_SKIP) {
+	(use_simd ? detect_multi_clpf_simd : detect_multi_clpf)(rec->y, org->y, xpos, ypos, rec->width, rec->height, org->stride_y, rec->stride_y, sum);
+        filtered = 1;
+      }
+    }
+  }
+
+  for (int i = 0; i < 4; i++) {
+    res[i][0] += sum[0];
+    res[i][1] += sum[1];
+    res[i][2] += sum[2];
+    res[i][3] += sum[3];
+  }
+  return filtered;
+}
+
+void clpf_test_frame(yuv_frame_t *rec, yuv_frame_t *org, const deblock_data_t *deblock_data, const frame_info_t *frame_info, int *best_strength, int *best_bs) {
+
+  int64_t sums[4][4];
+  int width = rec->width, height = rec->height;
+  const int bs = 8;
+  memset(sums, 0, sizeof(sums));
+  int fb_size_log2 = log2i(MAX_SB_SIZE);
+
+  for (int k = 0; k < (height+(1<<fb_size_log2)-bs)>>fb_size_log2; k++) {
+    for (int l = 0; l < (width+(1<<fb_size_log2)-bs)>>fb_size_log2; l++) {
+      int h = min(height, (k+1)<<fb_size_log2) & ((1<<fb_size_log2)-1);
+      int w = min(width, (l+1)<<fb_size_log2) & ((1<<fb_size_log2)-1);
+      h += !h << fb_size_log2;
+      w += !w << fb_size_log2;
+      clpf_rdo((k<<fb_size_log2), (l<<fb_size_log2), rec, org, deblock_data, bs, fb_size_log2, w/bs, h/bs, sums);
+    }
+  }
+  for (int j = 0; j < 4; j++) {
+    int cost = (int)((frame_info->lambda * sums[j][0] + 0.5));
+    for (int i = 0; i < 4; i++)
+      sums[j][i] = ((sums[j][i] + (i && j) * cost) << 4) + j*4+i;
+  }
+
+  int64_t best = (int64_t)1 << 62;
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++)
+      if ((!i || j) && sums[i][j] < best)
+        best = sums[i][j];
+  best &= 15;
+  *best_bs = (best > 3) * (5 + (best < 12) + (best < 8));
+  *best_strength = best ? 1<<((best-1) & 3) : 0;
 }
 
 void encode_frame(encoder_info_t *encoder_info)
@@ -68,8 +163,9 @@ void encode_frame(encoder_info_t *encoder_info)
   int k,l;
   int width = encoder_info->width;
   int height = encoder_info->height;  
-  int num_sb_hor = (width + MAX_BLOCK_SIZE - 1)/MAX_BLOCK_SIZE;
-  int num_sb_ver = (height + MAX_BLOCK_SIZE - 1)/MAX_BLOCK_SIZE;
+  int sb_size = 1 << encoder_info->params->log2_sb_size;
+  int num_sb_hor = (width + sb_size - 1) / sb_size;
+  int num_sb_ver = (height + sb_size - 1) / sb_size;
   stream_t *stream = encoder_info->stream;
 
   memset(encoder_info->deblock_data, 0, ((height/MIN_PB_SIZE) * (width/MIN_PB_SIZE) * sizeof(deblock_data_t)) );
@@ -107,29 +203,28 @@ void encode_frame(encoder_info_t *encoder_info)
     init_rate_control_per_frame(encoder_info->rc, min_qp, max_qp);
   }
 
-  putbits(1,encoder_info->frame_info.frame_type!=I_FRAME,stream);
-  putbits(8,(int)qp,stream);
-  putbits(4,(int)encoder_info->frame_info.num_intra_modes,stream);
+  put_flc(1,encoder_info->frame_info.frame_type!=I_FRAME,stream);
+  put_flc(8,(int)qp,stream);
+  put_flc(4,(int)encoder_info->frame_info.num_intra_modes,stream);
 
   // Signal actual number of reference frames
   if (frame_info->frame_type!=I_FRAME)
-    putbits(2,encoder_info->frame_info.num_ref-1,stream);
+    put_flc(2,encoder_info->frame_info.num_ref-1,stream);
 
   int r;
   for (r=0;r<encoder_info->frame_info.num_ref;r++){
-    putbits(6,encoder_info->frame_info.ref_array[r]+1,stream);
+    put_flc(6,encoder_info->frame_info.ref_array[r]+1,stream);
   }
   // 16 bit frame number for now
-  putbits(16,encoder_info->frame_info.frame_num,stream);
+  put_flc(16,encoder_info->frame_info.frame_num,stream);
 
   // Initialize prev_qp to qp used in frame header
   encoder_info->frame_info.prev_qp = encoder_info->frame_info.qp;
 
   for (k=0;k<num_sb_ver;k++){
     for (l=0;l<num_sb_hor;l++){
-      int xposY = l*MAX_BLOCK_SIZE;
-      int yposY = k*MAX_BLOCK_SIZE;
-
+      int xposY = l*sb_size;
+      int yposY = k*sb_size;
       for (int ref_idx = 0; ref_idx <= frame_info->num_ref - 1; ref_idx++){
         frame_info->mvcand_num[ref_idx] = 0;
         frame_info->mvcand_mask[ref_idx] = 0;
@@ -149,7 +244,7 @@ void encode_frame(encoder_info_t *encoder_info)
         max_qp = qp+max_delta_qp;
         int pqp = encoder_info->frame_info.prev_qp; // Save prev_qp in local variable
         for (qp0=min_qp;qp0<=max_qp;qp0+=encoder_info->params->delta_qp_step){
-          cost = process_block(encoder_info,MAX_BLOCK_SIZE,yposY,xposY,qp0);
+          cost = process_block(encoder_info, sb_size, yposY, xposY, qp0);
           if (cost < min_cost){
             min_cost = cost;
             best_qp = qp0;
@@ -157,19 +252,19 @@ void encode_frame(encoder_info_t *encoder_info)
         }
         encoder_info->frame_info.prev_qp = pqp; // Restore prev_qp from local variable
         write_stream_pos(stream,&stream_pos_ref);
-        process_block(encoder_info,MAX_BLOCK_SIZE,yposY,xposY,best_qp);
+        process_block(encoder_info, sb_size, yposY, xposY, best_qp);
       }
       else{
         if (encoder_info->params->bitrate > 0) {
           start_bits_sb = get_bit_pos(stream);
-          process_block(encoder_info, MAX_BLOCK_SIZE, yposY, xposY, qp);
+          process_block(encoder_info, sb_size, yposY, xposY, qp);
           end_bits_sb = get_bit_pos(stream);
           num_bits_sb = end_bits_sb - start_bits_sb;
           qp = update_rate_control_sb(encoder_info->rc, sb_idx, num_bits_sb, qp);
           sb_idx++;
         }
         else {
-          process_block(encoder_info, MAX_BLOCK_SIZE, yposY, xposY, qp);
+          process_block(encoder_info, sb_size, yposY, xposY, qp);
         }
       }
     }
@@ -184,13 +279,32 @@ void encode_frame(encoder_info_t *encoder_info)
     deblock_frame_uv(encoder_info->rec, encoder_info->deblock_data, width, height, qpc);
   }
 
-  int sb_signal = 1;
-
   if (encoder_info->params->clpf){
-    putbits(1, 1, stream);
-    putbits(1, !sb_signal, stream);
-    clpf_frame(encoder_info->rec, encoder_info->orig, encoder_info->deblock_data, stream,
-               sb_signal ? clpf_decision : clpf_true);
+    if (qp <= 16) // CLPF will have no effect if the quality is very high
+      put_flc(2, 0, stream);
+    else {
+      int enable_sb_flag = 1;
+      int fb_size_log2;
+      int strength;
+      // Find the best strength for the entire frame
+      clpf_test_frame(encoder_info->rec, encoder_info->orig, encoder_info->deblock_data, frame_info, &strength, &fb_size_log2);
+      if (!fb_size_log2) { // Disable sb signal
+        enable_sb_flag = 0;
+        fb_size_log2 = log2i(MAX_SB_SIZE);
+     }
+      if (!strength)  // Better to disable for the whole frame?
+        put_flc(2, 0, stream);
+      else {
+        // Apply the filter using the chosen strength
+        yuv_frame_t tmp = *encoder_info->rec;
+        put_flc(2, strength - (strength == 4), stream);
+        put_flc(2, (fb_size_log2-log2i(MAX_SB_SIZE)+3)*enable_sb_flag, stream);
+        clpf_frame(encoder_info->tmp, encoder_info->rec, encoder_info->orig, encoder_info->deblock_data, stream, enable_sb_flag, strength, fb_size_log2, enable_sb_flag ? clpf_decision : clpf_true);
+        *encoder_info->rec = *encoder_info->tmp;
+        *encoder_info->tmp = tmp;
+        encoder_info->rec->frame_num = tmp.frame_num;
+      }
+    }
   }
 
   if (encoder_info->params->bitrate > 0) {

@@ -30,16 +30,18 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "types.h"
 #include "simd.h"
 
-int get_left_available(int ypos, int xpos, int size, int width);
-int get_up_available(int ypos, int xpos, int size, int width);
-int get_upright_available(int ypos, int xpos, int size, int width);
-int get_downleft_available(int ypos, int xpos, int size, int height);
+int get_left_available(int ypos, int xpos, int bwidth, int bheight, int fwidth, int fheight, int sb_size);
+int get_up_available(int ypos, int xpos, int bwidth, int bheight, int fwidth, int fheight, int sb_size);
+int get_upright_available(int ypos, int xpos, int bwidth, int bheight, int fwidth, int fheight, int sb_size);
+int get_downleft_available(int ypos, int xpos, int bwidth, int bheight, int fwidth, int fheight, int sb_size);
 
-void dequantize (int16_t *coeff, int16_t *rcoeff, int qp, int size, qmtx_t * wt_matrix, int ws);
+void dequantize (int16_t *coeff, int16_t *rcoeff, int qp, int size, qmtx_t * wt_matrix);
 void reconstruct_block(int16_t *block, uint8_t *pblock, uint8_t *rec, int size, int stride);
 
 void find_block_contexts(int ypos, int xpos, int height, int width, int size, deblock_data_t *deblock_data, block_context_t *block_context, int enable);
 
-void clpf_block(const uint8_t *src, uint8_t *dst, int sstride, int dstride, int x0, int y0, int size, int width, int height);
+void clpf_block(const uint8_t *src, uint8_t *dst, int stride, int x0, int y0, int size, int width, int height, unsigned int strength);
+
+int clpf_sample(int X, int A, int B, int C, int D, int E, int F, int b);
 
 #endif

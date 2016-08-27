@@ -80,77 +80,81 @@ int chroma_qp[52] = {
         39, 40, 41, 42, 43, 44, 45
 };
 
-
-int super_table[8][20] = {
-  {-1,-1, -1,-1,-1,-1,-1,-1,-1,-1,  1, 0, 5, 2, 6, 3, 7, 4, 8,-1},
-  {-1, 0, -1,-1,-1,-1,-1,-1,-1,-1,  2, 1, 6, 3, 7, 5, 8, 4, 9,-1},
-  {-1, 0, -1,-1,-1,-1,-1,-1,-1,-1,  2, 1, 6, 3, 7, 5, 8, 4, 9,-1},
-  {-1, 0, -1,-1,-1,-1,-1,-1,-1,-1,  2, 1, 6, 3, 7, 5, 8, 4, 9,-1},
-
-  { 0,-1,  2, 1,12, 7,13, 5,16,11,  3, 4,14, 8, 9, 6,15,10,17,18},
-  { 0, 1,  3, 2,10, 7,11, 6,16, 9,  5, 4,15,13,14, 8,17,12,18,19},
-  { 0, 1,  3, 2,10, 4,12, 5,14, 6,  8, 7,15,13,16,11,17, 9,18,19},
-  { 0, 1,  3, 2, 7, 4, 8, 5, 9, 6, 11,10,15,14,16,13,17,12,18,19}
-};
-
 const uint16_t gquant_table[6] = {26214,23302,20560,18396,16384,14564};
 const uint16_t gdequant_table[6] = {40,45,51,57,64,72};
 
-int get_left_available(int ypos, int xpos, int size, int width){
+int get_left_available(int ypos, int xpos, int bwidth, int bheight, int fwidth, int fheight, int sb_size) {
   int left_available = xpos > 0;
   return left_available;
 }
 
-int get_up_available(int ypos, int xpos, int size, int width){
+int get_up_available(int ypos, int xpos, int bwidth, int bheight, int fwidth, int fheight, int sb_size) {
   int up_available = ypos > 0;
   return up_available;
 }
 
-int get_upright_available(int ypos, int xpos, int size, int width){
+int get_upright_available(int ypos, int xpos, int bwidth, int bheight, int fwidth, int fheight, int sb_size) {
 
-  int upright_available = (ypos > 0) && (xpos + size < width);
-  if (size==32 && (ypos%64)==32) upright_available = 0;
-  if (size==16 && ((ypos%32)==16 || ((ypos%64)==32 && (xpos%32)==16))) upright_available = 0;
-  if (size== 8 && ((ypos%16)==8 || ((ypos%32)==16 && (xpos%16)==8) || ((ypos%64)==32 && (xpos%32)==24))) upright_available = 0;
+  int upright_available;
+  int size, size2;
 
+  /* Test for frame boundaries */
+  upright_available = (ypos > 0) && (xpos + bwidth < fwidth);
+
+  /* Test for coding block boundaries */
+  size = max(bwidth, bheight);
+  for (size2 = size; size2 < sb_size; size2 *= 2) {
+    if ((ypos % (size2 << 1)) == size2 && (xpos % size2) == (size2 - size)) upright_available = 0;
+  }
   return upright_available;
 }
 
-int get_downleft_available(int ypos, int xpos, int size, int height){
+int get_downleft_available(int ypos, int xpos, int bwidth, int bheight, int fwidth, int fheight, int sb_size) {
 
-  int downleft_available = (xpos > 0) && (ypos + size < height);
-  if (size==64) downleft_available = 0;
-  if (size==32 && (ypos%64)==32) downleft_available = 0;
-  if (size==16 && ((ypos%64)==48 || ((ypos%64)==16 && (xpos%32)==16))) downleft_available = 0;
-  if (size== 8 && ((ypos%64)==56 || ((ypos%16)==8 && (xpos%16)==8) || ((ypos%64)==24 && (xpos%32)==16))) downleft_available = 0;
+  int downleft_available;
+  int size, size2;
+
+  /* Test for frame boundaries */
+  downleft_available = (xpos > 0) && (ypos + bheight < fheight);
+
+  size = max(bwidth, bheight);
+  /* Test for external super block boundaries */
+  if ((ypos % sb_size) == (sb_size - size) && (xpos % sb_size) == 0) downleft_available = 0;
+
+  /* Test for coding block boundaries */
+  size = max(bwidth, bheight);
+  for (size2 = 2 * size; size2 <= sb_size; size2 *= 2) {
+    if ((ypos % size2) == (size2 - size) && (xpos % size2) > 0) downleft_available = 0;
+  }
 
   return downleft_available;
 }
 
-void dequantize (int16_t *coeff, int16_t *rcoeff, int qp, int size, qmtx_t * wt_matrix, int ws)
+void dequantize (int16_t *coeff, int16_t *rcoeff, int qp, int size, qmtx_t * wt_matrix)
 {
   int tr_log2size = log2i(size);
   const int lshift = qp / 6;
+  const int qsize = min(size,MAX_QUANT_SIZE);
   const int rshift = tr_log2size - 1 + (wt_matrix!=NULL ? INV_WEIGHT_SHIFT : 0);
   const int64_t scale = gdequant_table[qp % 6];
   const int64_t add = lshift < rshift ? (1<<(rshift-lshift-1)) : 0;
 
   if (lshift >= rshift) {
-    for (int i = 0; i < size ; i++){
-      for (int j = 0; j < size; j++){
+    for (int i = 0; i < qsize ; i++){
+      for (int j = 0; j < qsize; j++){
         int c = coeff[i*size+j];
         if (wt_matrix)
-          c = c*wt_matrix[i*ws+j];
-        rcoeff[i*size+j] = (c * scale) << (lshift-rshift);// needs clipping?
+          c = c*wt_matrix[i*qsize+j];
+        rcoeff[i*size+j] = (int16_t)((c * scale) << (lshift-rshift));// needs clipping?
       }
     }
   } else {
-    for (int i = 0; i < size ; i++){
-      for (int j = 0; j < size; j++){
+    for (int i = 0; i < qsize ; i++){
+      for (int j = 0; j < qsize; j++){
         int c = coeff[i*size+j];
         if (wt_matrix)
-          c = c*wt_matrix[i*ws+j];
-        rcoeff[i*size+j] = (c * scale + add) >> (rshift - lshift);//needs clipping
+          c = c*wt_matrix[i*qsize+j];
+        rcoeff[i*size+j] = (int16_t)((c * scale + add) >> (rshift - lshift));//needs clipping
       }
     }
 
@@ -189,21 +193,26 @@ void find_block_contexts(int ypos, int xpos, int height, int width, int size, de
   }
 }
 
-void clpf_block(const uint8_t *src, uint8_t *dst, int sstride, int dstride, int x0, int y0, int size, int width, int height) {
-  int left = x0 & ~(dstride-1);
-  int top = y0 & ~(dstride-1);
-  int right = min(width-1, left + dstride-1);
-  int bottom = min(height-1, top + dstride-1);
+int clpf_sample(int X, int A, int B, int C, int D, int E, int F, int b) {
+  int delta =
+    4*clip(A - X, -b, b) + clip(B - X, -b, b) + 3*clip(C - X, -b, b) +
+    3*clip(D - X, -b, b) + clip(E - X, -b, b) + 4*clip(F - X, -b, b);
+  return (8 + delta - (delta < 0)) >> 4;
+}
 
-  for (int y=y0;y<y0+size;y++){
-    for (int x=x0;x<x0+size;x++) {
-      int X = src[(y+0)*sstride + x+0];
-      int A = y == top ? X : src[(y-1)*sstride + x+0];
-      int B = x == left ? X : src[(y+0)*sstride + x-1];
-      int C = x == right ? X : src[(y+0)*sstride + x+1];
-      int D = y == bottom ? X : src[(y+1)*sstride + x+0];
-      int delta = ((A>X)+(B>X)+(C>X)+(D>X) > 2) - ((A<X)+(B<X)+(C<X)+(D<X) > 2);
-      dst[(y-top)*dstride + x-left] = X + delta;
+void clpf_block(const uint8_t *src, uint8_t *dst, int stride, int x0, int y0, int size, int width, int height, unsigned int strength) {
+  for (int y = y0; y < y0+size; y++){
+    for (int x = x0; x < x0+size; x++) {
+      int X = src[y*stride + x];
+      int A = src[max(0, y-1)*stride + x];
+      int B = src[y*stride + max(0, x-2)];
+      int C = src[y*stride + max(0, x-1)];
+      int D = src[y*stride + min(width-1, x+1)];
+      int E = src[y*stride + min(width-1, x+2)];
+      int F = src[min(height-1, y+1)*stride + x];
+      int delta;
+      delta = clpf_sample(X, A, B, C, D, E, F, strength);
+      dst[y*stride + x] = X + delta;
     }
   }
 }

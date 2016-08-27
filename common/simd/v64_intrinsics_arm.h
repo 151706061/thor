@@ -82,7 +82,7 @@ SIMD_INLINE uint32_t u32_load_aligned(const void *p) {
 }
 
 SIMD_INLINE uint32_t u32_load_unaligned(const void *p) {
-  return *((uint32_t*)p);
+  return vget_lane_u32(vreinterpret_u32_u8(vld1_u8((const uint8_t*)p)), 0);
 }
 
 SIMD_INLINE void u32_store_aligned(void *p, uint32_t a) {
@@ -90,7 +90,7 @@ SIMD_INLINE void u32_store_aligned(void *p, uint32_t a) {
 }
 
 SIMD_INLINE void u32_store_unaligned(void *p, uint32_t a) {
-  *((uint32_t*)p) = a;
+  vst1_u8(p, vreinterpret_u8_u64(a));
 }
 
 SIMD_INLINE v64 v64_load_aligned(const void *p) {
@@ -245,6 +245,10 @@ SIMD_INLINE v64 v64_ssub_u8(v64 x, v64 y) {
   return vreinterpret_s64_u8(vqsub_u8(vreinterpret_u8_s64(x), vreinterpret_u8_s64(y)));
 }
 
+SIMD_INLINE v64 v64_ssub_s8(v64 x, v64 y) {
+  return vreinterpret_s64_s8(vqsub_s8(vreinterpret_s8_s64(x), vreinterpret_s8_s64(y)));
+}
+
 SIMD_INLINE v64 v64_sub_32(v64 x, v64 y) {
   return vreinterpret_s64_s32(vsub_s32(vreinterpret_s32_s64(x), vreinterpret_s32_s64(y)));
 }
@@ -301,6 +305,14 @@ SIMD_INLINE v64 v64_max_u8(v64 x, v64 y) {
 
 SIMD_INLINE v64 v64_min_u8(v64 x, v64 y) {
   return vreinterpret_s64_u8(vmin_u8(vreinterpret_u8_s64(x), vreinterpret_u8_s64(y)));
+}
+
+SIMD_INLINE v64 v64_max_s8(v64 x, v64 y) {
+  return vreinterpret_s64_s8(vmax_s8(vreinterpret_s8_s64(x), vreinterpret_s8_s64(y)));
+}
+
+SIMD_INLINE v64 v64_min_s8(v64 x, v64 y) {
+  return vreinterpret_s64_s8(vmin_s8(vreinterpret_s8_s64(x), vreinterpret_s8_s64(y)));
 }
 
 SIMD_INLINE v64 v64_max_s16(v64 x, v64 y) {

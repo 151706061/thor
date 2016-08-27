@@ -36,6 +36,7 @@ typedef struct
 {
   unsigned int width;
   unsigned int height;
+  int log2_sb_size;
   unsigned int qp;
   char *infilestr;
   char *outfilestr;
@@ -43,7 +44,7 @@ typedef struct
   char *statfilestr;
   unsigned int file_headerlen;
   unsigned int frame_headerlen;
-  unsigned int num_frames;
+  int num_frames;
   int skip;
   float frame_rate;
   float lambda_coeffI;
@@ -92,13 +93,14 @@ typedef struct
   int max_qpI;
   int min_qpI;
   int qmtx;
+  int qmtx_offset;
 } enc_params;
 
 typedef struct
 {
-  uint8_t y[MAX_BLOCK_SIZE*MAX_BLOCK_SIZE];
-  uint8_t u[MAX_BLOCK_SIZE/2*MAX_BLOCK_SIZE/2];
-  uint8_t v[MAX_BLOCK_SIZE/2*MAX_BLOCK_SIZE/2];
+  uint8_t y[MAX_SB_SIZE*MAX_SB_SIZE];
+  uint8_t u[MAX_SB_SIZE/2*MAX_SB_SIZE/2];
+  uint8_t v[MAX_SB_SIZE/2*MAX_SB_SIZE/2];
 } yuv_block_t;
 
 typedef struct
@@ -138,10 +140,6 @@ typedef struct
   double lambda;
   int num_intra_modes;
   int frame_num;
-#if TEST_AVAILABILITY
-  int ur[9][9];
-  int dl[9][9];
-#endif
   int interp_ref;
   int b_level;
   double lambda_coeff;
@@ -156,6 +154,7 @@ typedef struct
   enc_params *params;
   yuv_frame_t *orig;
   yuv_frame_t *rec;
+  yuv_frame_t *tmp;
   yuv_frame_t *ref[MAX_REF_FRAMES];
   yuv_frame_t *interp_frames[MAX_SKIP_FRAMES];
   stream_t *stream;
@@ -164,8 +163,8 @@ typedef struct
   int width;
   int height;
   int depth;
-  qmtx_t *wmatrix[52][3][2][TR_SIZE_RANGE];
-  qmtx_t *iwmatrix[52][3][2][TR_SIZE_RANGE];
+  qmtx_t *wmatrix[NUM_QM_LEVELS][3][2][TR_SIZE_RANGE];
+  qmtx_t *iwmatrix[NUM_QM_LEVELS][3][2][TR_SIZE_RANGE];
 } encoder_info_t;
 
 #endif

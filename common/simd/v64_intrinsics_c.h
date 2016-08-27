@@ -246,6 +246,16 @@ SIMD_INLINE c_v64 c_v64_ssub_u8(c_v64 a, c_v64 b) {
   return t;
 }
 
+SIMD_INLINE c_v64 c_v64_ssub_s8(c_v64 a, c_v64 b) {
+  c_v64 t;
+  int c;
+  for (c = 0; c < 8; c++) {
+    int16_t d = (int16_t)a.s8[c] - (int16_t)b.s8[c];
+    t.s8[c] = d > 127 ? 127 : (d < -128 ? -128 : d);
+  }
+  return t;
+}
+
 SIMD_INLINE c_v64 c_v64_sub_16(c_v64 a, c_v64 b) {
   c_v64 t;
   int c;
@@ -544,7 +554,7 @@ SIMD_INLINE int64_t c_v64_hadd_s16(c_v64 a) {
   return a.s16[3] + a.s16[2] + a.s16[1] + a.s16[0];
 }
 
-typedef uint64_t c_sad64_internal;
+typedef uint32_t c_sad64_internal;
 
 /* Implementation dependent return value.  Result must be finalised with v64_sad_u8_sum().
    The result for more than 32 v64_sad_u8() calls is undefined. */
@@ -559,11 +569,11 @@ SIMD_INLINE c_sad64_internal c_v64_sad_u8(c_sad64_internal s, c_v64 a, c_v64 b) 
   return s;
 }
 
-SIMD_INLINE uint64_t c_v64_sad_u8_sum(c_sad64_internal s) {
+SIMD_INLINE uint32_t c_v64_sad_u8_sum(c_sad64_internal s) {
   return s;
 }
 
-typedef uint64_t c_ssd64_internal;
+typedef uint32_t c_ssd64_internal;
 
 /* Implementation dependent return value.  Result must be finalised with v64_ssd_u8_sum(). */
 SIMD_INLINE c_ssd64_internal c_v64_ssd_u8_init() {
@@ -577,7 +587,7 @@ SIMD_INLINE c_ssd64_internal c_v64_ssd_u8(c_ssd64_internal s, c_v64 a, c_v64 b) 
   return s;
 }
 
-SIMD_INLINE uint64_t c_v64_ssd_u8_sum(c_ssd64_internal s) {
+SIMD_INLINE uint32_t c_v64_ssd_u8_sum(c_ssd64_internal s) {
   return s;
 }
 
@@ -690,6 +700,22 @@ SIMD_INLINE c_v64 c_v64_max_u8(c_v64 a, c_v64 b) {
   int c;
   for (c = 0; c < 8; c++)
     t.u8[c] = a.u8[c] > b.u8[c] ? a.u8[c] : b.u8[c];
+  return t;
+}
+
+SIMD_INLINE c_v64 c_v64_min_s8(c_v64 a, c_v64 b) {
+  c_v64 t;
+  int c;
+  for (c = 0; c < 8; c++)
+    t.s8[c] = a.s8[c] > b.s8[c] ? b.s8[c] : a.s8[c];
+  return t;
+}
+
+SIMD_INLINE c_v64 c_v64_max_s8(c_v64 a, c_v64 b) {
+  c_v64 t;
+  int c;
+  for (c = 0; c < 8; c++)
+    t.s8[c] = a.s8[c] > b.s8[c] ? a.s8[c] : b.s8[c];
   return t;
 }
 

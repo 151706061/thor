@@ -76,15 +76,15 @@ int main(int argc, char **argv)
 {
   FILE *infile, *strfile, *reconfile;
 
-  uint32_t input_file_size; //TODO: Support file size values larger than 32 bits 
+  int input_file_size; //TODO: Support file size values larger than 32 bits 
   yuv_frame_t orig,ref[MAX_REF_FRAMES];
-  yuv_frame_t rec[MAX_REORDER_BUFFER];
+  yuv_frame_t rec[MAX_REORDER_BUFFER+1];  // Last one is for temp use
   int rec_available[MAX_REORDER_BUFFER] = {0};
   int last_frame_output=-1;
   int num_encoded_frames,num_bits,start_bits,end_bits;
   int sub_gop=1;
   int rec_buffer_idx;
-  int frame_num,frame_num0,k,r;
+  int k,frame_num,frame_num0,r;
   int frame_offset;
   int ysize,csize,frame_size;
   int width,height;
@@ -161,7 +161,7 @@ int main(int argc, char **argv)
 
   /* Create frames*/
   create_yuv_frame(&orig,width,height,0,0,0,0);
-  for (r=0;r<MAX_REORDER_BUFFER;r++){
+  for (r=0;r<MAX_REORDER_BUFFER+1;r++){
     create_yuv_frame(&rec[r],width,height,0,0,0,0);
   }
   for (r=0;r<MAX_REF_FRAMES;r++){ //TODO: Use Long-term frame instead of a large sliding window
@@ -194,25 +194,26 @@ int main(int argc, char **argv)
 
   encoder_info.deblock_data = (deblock_data_t *)malloc((height/MIN_PB_SIZE) * (width/MIN_PB_SIZE) * sizeof(deblock_data_t));
 
-  alloc_wmatrices(encoder_info.wmatrix);
-  alloc_wmatrices(encoder_info.iwmatrix);
-
-  make_wmatrices(encoder_info.wmatrix, encoder_info.iwmatrix);
+  alloc_wmatrices(encoder_info.wmatrix, 0);
+  alloc_wmatrices(encoder_info.iwmatrix, 1);
 
   /* Write sequence header */ //TODO: Separate function for sequence header
   start_bits = get_bit_pos(&stream);
-  putbits(16,width,&stream);
-  putbits(16,height,&stream);
-  putbits(1,params->enable_pb_split,&stream);
-  putbits(1,params->enable_tb_split,&stream);
-  putbits(2,params->max_num_ref-1,&stream); //TODO: Support more than 4 reference frames
-  putbits(1,params->interp_ref,&stream);// Use an interpolated reference frame
-  putbits(1, (params->max_delta_qp || params->bitrate), &stream);
-  putbits(1,params->deblocking,&stream);
-  putbits(1,params->clpf,&stream);
-  putbits(1,params->use_block_contexts,&stream);
-  putbits(1,params->enable_bipred,&stream);
-  putbits(1,params->qmtx,&stream);
+  put_flc(16,width,&stream);
+  put_flc(16,height,&stream);
+  put_flc(3,params->log2_sb_size, &stream);
+  put_flc(1,params->enable_pb_split,&stream);
+  put_flc(1,params->enable_tb_split,&stream);
+  put_flc(2,params->max_num_ref-1,&stream); //TODO: Support more than 4 reference frames
+  put_flc(1,params->interp_ref,&stream);// Use an interpolated reference frame
+  put_flc(1, (params->max_delta_qp || params->bitrate), &stream);
+  put_flc(1,params->deblocking,&stream);
+  put_flc(1,params->clpf ? 1 : 0,&stream);
+  put_flc(1,params->use_block_contexts,&stream);
+  put_flc(1,params->enable_bipred,&stream);
+  put_flc(1,params->qmtx,&stream);
+  if (params->qmtx)
+    put_flc(6,params->qmtx_offset+32,&stream);
 
   end_bits = get_bit_pos(&stream);
   num_bits = end_bits-start_bits;
@@ -231,8 +232,9 @@ int main(int argc, char **argv)
   rate_control_t rc;
   encoder_info.rc = &rc;
   if (params->bitrate > 0) {
-    int target_bits = params->bitrate / params->frame_rate;
-    int num_sb = ((width + MAX_BLOCK_SIZE - 1) / MAX_BLOCK_SIZE) * ((height + MAX_BLOCK_SIZE - 1) / MAX_BLOCK_SIZE);
+    int target_bits = (int)(params->bitrate / params->frame_rate);
+    int sb_size = 1 << params->log2_sb_size;
+    int num_sb = ((width + sb_size - 1) / sb_size) * ((height + sb_size - 1) / sb_size);
     init_rate_control_per_sequence(&rc, target_bits, num_sb);
   }
 
@@ -249,6 +251,7 @@ int main(int argc, char **argv)
       encoder_info.frame_info.frame_num = frame_num - params->skip;
       rec_buffer_idx = encoder_info.frame_info.frame_num%MAX_REORDER_BUFFER;
       encoder_info.rec = &rec[rec_buffer_idx];
+      encoder_info.tmp = &rec[MAX_REORDER_BUFFER];
       encoder_info.rec->frame_num = encoder_info.frame_info.frame_num;
       if (params->num_reorder_pics==0) {
         if (params->intra_period > 0)
@@ -652,11 +655,8 @@ int main(int argc, char **argv)
     }
   }
 
-  free_wmatrices(encoder_info.wmatrix);
-  free_wmatrices(encoder_info.iwmatrix);
-
   close_yuv_frame(&orig);
-  for (int i=0; i<MAX_REORDER_BUFFER; ++i) {
+  for (int i=0; i<MAX_REORDER_BUFFER+1; ++i) {
     close_yuv_frame(&rec[i]);
   }
   for (r=0;r<MAX_REF_FRAMES;r++){

@@ -60,6 +60,7 @@ typedef struct
 {
     frame_info_t frame_info;
     yuv_frame_t *rec;
+    yuv_frame_t *tmp;
     yuv_frame_t *ref[MAX_REF_FRAMES];
     yuv_frame_t *interp_frames[MAX_SKIP_FRAMES];
     stream_t *stream;
@@ -82,7 +83,9 @@ typedef struct
     int bipred;
     int depth;
     int qmtx;
-    qmtx_t *iwmatrix[52][3][2][TR_SIZE_RANGE];
+    int qmtx_offset;
+    int log2_sb_size;
+    qmtx_t *iwmatrix[NUM_QM_LEVELS][3][2][TR_SIZE_RANGE];
 } decoder_info_t;
 
 #endif

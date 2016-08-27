@@ -33,7 +33,6 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <assert.h>
 
 #include "global.h"
-#include "getbits.h"
 #include "getvlc.h"
 #include "common_block.h"
 #include "inter_prediction.h"
@@ -41,28 +40,33 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 extern int zigzag16[16];
 extern int zigzag64[64];
 extern int zigzag256[256];
-extern int super_table[8][20];
+
+int YPOS, XPOS;
 
 void read_mv(stream_t *stream,mv_t *mv,mv_t *mvp)
 {
     mv_t mvd;
-    int code;
+    int mvabs, mvsign = 0;
 
-    code = get_vlc(10,stream);
-    mvd.x = code&1 ? -((code+1)/2) : code/2;
+    /* MVX */
+    if ((mvabs = get_vlc(7, stream)))
+      mvsign = get_flc(1, stream);
+    mvd.x = mvabs * (mvsign ? -1 : 1);
     mv->x = mvp->x + mvd.x;
 
-    code = get_vlc(10,stream);
-    mvd.y = code&1 ? -((code+1)/2) : code/2;
+    /* MVY */
+    if ((mvabs = get_vlc(7, stream)))
+      mvsign = get_flc(1, stream);
+    mvd.y = mvabs * (mvsign ? -1 : 1);
     mv->y = mvp->y + mvd.y;
 }
 
-int YPOS,XPOS;
+
 
 void read_coeff(stream_t *stream,int16_t *coeff,int size,int type){
 
   int16_t scoeff[MAX_QUANT_SIZE*MAX_QUANT_SIZE];
-  int i,j,levelFlag,sign,level,pos,run,tmp,vlc,code;
+  int i,j,levelFlag,sign,level,pos,run,tmp,code;
   int qsize = min(size,MAX_QUANT_SIZE);
   int N = qsize*qsize;
   int level_mode;
@@ -77,9 +81,9 @@ void read_coeff(stream_t *stream,int16_t *coeff,int size,int type){
   pos = 0;
   /* Use one bit to signal chroma/last_pos=1/level=1 */
   if (chroma_flag==1){
-    int tmp = getbits1(stream);
+    int tmp = get_flc(1, stream);
     if (tmp){
-      sign = getbits1(stream);
+      sign = get_flc(1, stream);
       scoeff[pos] = sign ? -1 : 1;
       pos = N;
     }
@@ -94,7 +98,7 @@ void read_coeff(stream_t *stream,int16_t *coeff,int size,int type){
       while (pos < N && level > 0){
         level = get_vlc(vlc_adaptive,stream);
         if (level){
-          sign = getbits1(stream);
+          sign = get_flc(1, stream);
         }
         else{
           sign = 1;
@@ -112,19 +116,11 @@ void read_coeff(stream_t *stream,int16_t *coeff,int size,int type){
     /* Run-mode */
     int eob;
     int eob_pos = chroma_flag ? 0 : 2;
-    if (chroma_flag && size <= 8) {
-      vlc = 10;
-      code = get_vlc(vlc, stream);
-    }
-    else {
-      vlc = 2;
-      if (showbits(stream, 2) == 2) {
-        code = getbits(stream, 2) - 2;
-      }
-      else {
-        code = get_vlc(vlc, stream) - 1;
-      }
-    }
+    if (chroma_flag && size <= 8)
+      code = get_vlc(10, stream);
+    else
+      code = get_vlc(6, stream);
+
     eob = code == eob_pos;
     if (eob) {
       break;
@@ -145,7 +141,7 @@ void read_coeff(stream_t *stream,int16_t *coeff,int size,int type){
     }
     else{
       level = 1;
-      sign = getbits1(stream);
+      sign = get_flc(1, stream);
     }
     scoeff[pos] = sign ? -level : level;
 
@@ -173,7 +169,7 @@ int read_delta_qp(stream_t *stream){
   sign_delta_qp = 0;
   abs_delta_qp = get_vlc(0,stream);
   if (abs_delta_qp > 0)
-    sign_delta_qp = getbits(stream,1);
+    sign_delta_qp = get_flc(1, stream);
   delta_qp = sign_delta_qp ? -abs_delta_qp : abs_delta_qp;
   return delta_qp;
 }
@@ -182,7 +178,7 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
   int width = decoder_info->width;
   int height = decoder_info->height;
   int bit_start;
-  int code,tmp,tb_split;
+  int code,tb_split;
   int pb_part=0;
   cbp_t cbp;
   int stat_frame_type = decoder_info->bit_count.stat_frame_type; //TODO: Use only one variable for frame type
@@ -223,24 +219,19 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
     /* Derive skip vector candidates and number of skip vector candidates from neighbour blocks */
     mv_t mv_skip[MAX_NUM_SKIP];
     int num_skip_vec,skip_idx;
-    int bipred_copy = decoder_info->frame_info.interp_ref || stat_frame_type == P_FRAME ? 0 : 1;
     inter_pred_t skip_candidates[MAX_NUM_SKIP];
-    num_skip_vec = get_mv_skip(ypos, xpos, width, height, size, decoder_info->deblock_data, skip_candidates, bipred_copy);
+    num_skip_vec = get_mv_skip(ypos, xpos, width, height, size, size, 1 << decoder_info->log2_sb_size, decoder_info->deblock_data, skip_candidates);
     for (int idx = 0; idx < num_skip_vec; idx++) {
       mv_skip[idx] = skip_candidates[idx].mv0;
     }
     /* Decode skip index */
     if (num_skip_vec == 4)
-      skip_idx = getbits(stream,2);
+      skip_idx = get_flc(2, stream);
     else if (num_skip_vec == 3){
-      tmp = getbits(stream,1);
-      if (tmp)
-        skip_idx = 0;
-      else
-        skip_idx = 1 + getbits(stream,1);
+      skip_idx = get_vlc(12, stream);
     }
     else if (num_skip_vec == 2){
-      skip_idx = getbits(stream,1);
+      skip_idx = get_flc(1, stream);
     }
     else
       skip_idx = 0;
@@ -271,22 +262,18 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
     mv_t mv_skip[MAX_NUM_SKIP];
     int num_skip_vec,skip_idx;
     inter_pred_t merge_candidates[MAX_NUM_SKIP];
-    num_skip_vec = get_mv_merge(ypos, xpos, width, height, size, decoder_info->deblock_data, merge_candidates);
+    num_skip_vec = get_mv_merge(ypos, xpos, width, height, size, size, 1 << decoder_info->log2_sb_size, decoder_info->deblock_data, merge_candidates);
     for (int idx = 0; idx < num_skip_vec; idx++) {
       mv_skip[idx] = merge_candidates[idx].mv0;
     }
     /* Decode skip index */
     if (num_skip_vec == 4)
-      skip_idx = getbits(stream,2);
+      skip_idx = get_flc(2, stream);
     else if (num_skip_vec == 3){
-      tmp = getbits(stream,1);
-      if (tmp)
-        skip_idx = 0;
-      else
-        skip_idx = 1 + getbits(stream,1);
+      skip_idx = get_vlc(12, stream);
     }
     else if (num_skip_vec == 2){
-      skip_idx = getbits(stream,1);
+      skip_idx = get_flc(1, stream);
     }
     else
       skip_idx = 0;
@@ -317,21 +304,7 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
 
     if (decoder_info->pb_split){
       /* Decode PU partition */
-      tmp = getbits(stream,1);
-      if (tmp==1){
-        code = 0;
-      }
-      else{
-        tmp = getbits(stream,1);
-        if (tmp==1){
-          code = 1;
-        }
-        else{
-          tmp = getbits(stream,1);
-          code = 3 - tmp;
-        }
-      }
-      pb_part = code;
+      pb_part = get_vlc(13, stream);
     }
     else{
       pb_part = 0;
@@ -347,7 +320,7 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
     //if (mode==MODE_INTER)
     decoder_info->bit_count.size_and_ref_idx[stat_frame_type][log2i(size)-3][ref_idx] += 1;
 
-    mvp = get_mv_pred(ypos,xpos,width,height,size,ref_idx,decoder_info->deblock_data);
+    mvp = get_mv_pred(ypos,xpos,width,height,size,size,1<<decoder_info->log2_sb_size,ref_idx,decoder_info->deblock_data);
 
     /* Deode motion vectors for each prediction block */
     mv_t mvp2 = mvp;
@@ -386,7 +359,7 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
   }
   else if (mode==MODE_BIPRED){
     int ref_idx = 0;
-    mvp = get_mv_pred(ypos,xpos,width,height,size,ref_idx,decoder_info->deblock_data);
+    mvp = get_mv_pred(ypos,xpos,width,height,size,size,1 << decoder_info->log2_sb_size, ref_idx,decoder_info->deblock_data);
 
     /* Deode motion vectors */
     mv_t mvp2 = mvp;
@@ -394,21 +367,7 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
 #if BIPRED_PART
     if (decoder_info->pb_split) {
       /* Decode PU partition */
-      tmp = getbits(stream, 1);
-      if (tmp == 1) {
-        code = 0;
-      }
-      else {
-        tmp = getbits(stream, 1);
-        if (tmp == 1) {
-          code = 1;
-        }
-        else {
-          tmp = getbits(stream, 1);
-          code = 3 - tmp;
-        }
-      }
-      pb_part = code;
+      pb_part = get_vlc(13, stream);
     }
     else {
       pb_part = 0;
@@ -470,7 +429,7 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
     }
     else{
       if (decoder_info->frame_info.num_ref == 2) {
-        int code = get_vlc0_limit(3, stream);
+        int code = get_vlc(13, stream);
         block_info->block_param.ref_idx0 = (code >> 1) & 1;
         block_info->block_param.ref_idx1 = (code >> 0) & 1;
       }
@@ -489,50 +448,10 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
   else if (mode==MODE_INTRA){
     /* Decode intra prediction mode */
     if (decoder_info->frame_info.num_intra_modes<=4){
-      intra_mode = getbits(stream,2);
+      intra_mode = get_flc(2, stream);
     }
-    else if (decoder_info->frame_info.num_intra_modes<=8){
-      int intra_mode_map_inv[MAX_NUM_INTRA_MODES] = {3,2,0,9,8,4,7,6,1,5};
-      int tmp,code;
-      tmp = getbits(stream,2);
-      if (tmp<3){
-        code = tmp;
-      }
-      else{
-        tmp = getbits(stream,2);
-        if (tmp<3){
-          code = 3 + tmp;
-        }
-        else{
-          tmp = getbits(stream,1);
-          code = 6 + tmp;
-        }
-      }
-      intra_mode = intra_mode_map_inv[code];
-    }
-    else if (decoder_info->frame_info.num_intra_modes<=10){
-      int intra_mode_map_inv[MAX_NUM_INTRA_MODES] = {3,2,0,1,9,8,4,7,6,5};
-      int tmp,code;
-      tmp = getbits(stream,1);
-      if (tmp){
-        code = getbits(stream,1);
-      }
-      else{
-        tmp = getbits(stream,1);
-        if (tmp){
-          code = 2 + getbits(stream,1);
-        }
-        else{
-          tmp = getbits(stream,1);
-          if (tmp){
-            code = 4 + getbits(stream,1);
-          }
-          else{
-            code = 6 + getbits(stream,2);
-          }
-        }
-      }
-      intra_mode = intra_mode_map_inv[code];
+    else {
+      intra_mode = get_vlc(8, stream);
     }
 
     decoder_info->bit_count.intra_mode[stat_frame_type] += (stream->bitcnt - bit_start);
@@ -549,15 +468,15 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
 
 
   if (mode!=MODE_SKIP){
-    int tmp,cbp2;
+    int tmp;
     int cbp_table[8] = {1,0,5,2,6,3,7,4};
 
     bit_start = stream->bitcnt;
     code = get_vlc(0,stream);
-
-    if (decoder_info->tb_split_enable && (mode == MODE_INTRA || mode == MODE_INTER)) {
-      tb_split = code==2;
-      if (code > 2) code -= 1;
+    int off = (mode == MODE_MERGE) ? 1 : 2;
+    if (decoder_info->tb_split_enable) {
+      tb_split = code == off;
+      if (code > off) code -= 1;
       if (tb_split)
         decoder_info->bit_count.cbp2_stat[0][stat_frame_type][mode-1][log2i(size)-3][8] += 1;
     }
@@ -575,18 +494,17 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
         else if (code>0)
           code = code+1;
       }
-      while (tmp < 8 && code != cbp_table[tmp]) tmp++;
-      if (mode!=MODE_MERGE){
-        if (decoder_info->block_context->cbp==0 && tmp < 2){
-          tmp = 1-tmp;
+      else {
+        if (decoder_info->block_context->cbp == 0 && code < 2) {
+          code = 1 - code;
         }
       }
-      cbp2 = tmp;
-      decoder_info->bit_count.cbp2_stat[max(0,decoder_info->block_context->cbp)][stat_frame_type][mode-1][log2i(size)-3][cbp2] += 1;
+      while (tmp < 8 && code != cbp_table[tmp]) tmp++;
+      decoder_info->bit_count.cbp2_stat[max(0,decoder_info->block_context->cbp)][stat_frame_type][mode-1][log2i(size)-3][tmp] += 1;
 
-      cbp.y = ((cbp2>>0)&1);
-      cbp.u = ((cbp2>>1)&1);
-      cbp.v = ((cbp2>>2)&1);
+      cbp.y = ((tmp>>0)&1);
+      cbp.u = ((tmp>>1)&1);
+      cbp.v = ((tmp>>2)&1);
       block_info->cbp = cbp;
 
       if (cbp.y){
@@ -680,7 +598,7 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
         /* Loop over 4 TUs */
         for (index=0;index<4;index++){
           bit_start = stream->bitcnt;
-          cbp.y = getbits(stream,1);
+          cbp.y = get_flc(1, stream);
           decoder_info->bit_count.cbp[stat_frame_type] += (stream->bitcnt - bit_start);
 
           /* Y */
@@ -697,28 +615,9 @@ int read_block(decoder_info_t *decoder_info,stream_t *stream,block_info_dec_t *b
 
         bit_start = stream->bitcnt;
         int tmp;
-        tmp = getbits(stream,1);
-        if (tmp){
-          cbp.u = cbp.v = 0;
-        }
-        else{
-          tmp = getbits(stream,1);
-          if (tmp){
-            cbp.u = 1;
-            cbp.v = 0;
-          }
-          else{
-            tmp = getbits(stream,1);
-            if (tmp){
-              cbp.u = 0;
-              cbp.v = 1;
-            }
-            else{
-              cbp.u = 1;
-              cbp.v = 1;
-            }
-          }
-        }
+        tmp = get_vlc(13, stream);
+        cbp.u = tmp & 1;
+        cbp.v = (tmp >> 1) & 1;
         decoder_info->bit_count.cbp[stat_frame_type] += (stream->bitcnt - bit_start);
         if (cbp.u){
           bit_start = stream->bitcnt;

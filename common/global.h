@@ -54,13 +54,13 @@ static inline void fatalerror(char error_text[])
 #define clip255(n) min(255, max(0, (n)))
 #define clip(n, low, high) min ((high), max ((n), (low)))
 
-#define MAX_BLOCK_SIZE 64        //Maximum block size
+#define MAX_SB_SIZE 128          //Maximum block size
 #define MIN_BLOCK_SIZE 8         //Minimum block size
-#define NUM_BLOCK_SIZES 4        //Number of distinct block sizes (=log2(MAX_BLOCK_SIZE/MIN_BLOCK_SIZE)+1)
+#define NUM_BLOCK_SIZES 5        //Number of distinct block sizes (=log2(MAX_SB_SIZE/MIN_BLOCK_SIZE)+1)
 #define MIN_PB_SIZE 4            //Minimum pu block size
 #define MAX_QUANT_SIZE 16        //Maximum quantization block size
 #define MAX_BUFFER_SIZE 4000000  //Maximum compressed buffer size per frame
-#define MAX_TR_SIZE 64           //Maximum transform size
+#define MAX_TR_SIZE 128          //Maximum transform size
 #define TR_SIZE_RANGE (NUM_BLOCK_SIZES+1)
 #define PADDING_Y 96             //One-sided padding range for luma
 #define MAX_UINT32 1<<31         //Used e.g. to initialize search for minimum cost
@@ -99,18 +99,11 @@ static inline void fatalerror(char error_text[])
 #define COEFF_TYPE_INTRA_Y 2     // Coefficient types for modifying coding
 #define COEFF_TYPE_INTRA_C 3     // Coefficient types for modifying coding
 
-#define LOW_RES_QM 1
-#if LOW_RES_QM
 #define qmtx_t uint16_t
 #define INV_WEIGHT_SHIFT 6      // Bit accuracy of inverse weights
 #define WEIGHT_SHIFT 6          // Bit accuracy of forward weights
-#else
-#define qmtx_t uint16_t
-#define INV_WEIGHT_SHIFT 8      // Bit accuracy of inverse weights
-#define WEIGHT_SHIFT 8          // Bit accuracy of forward weights
-#endif
+#define NUM_QM_LEVELS 12
 
 /* Testing and analysis*/
 #define STAT 0                   //Extended statistics printout in decoder
-#define TEST_AVAILABILITY 0      //Test availability functions
 #endif

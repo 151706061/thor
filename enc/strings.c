@@ -92,7 +92,7 @@ static char **read_config_file(FILE *f, int *num_of_params)
 
       if (a[0] == ';')
       {
-        fscanf(f, "%[^\n]", a);
+        ret = fscanf(f, "%[^\n]", a);
         continue;
       }
     }
@@ -104,7 +104,7 @@ static char **read_config_file(FILE *f, int *num_of_params)
       if (ret < 1 || ret == EOF)
         break;
 
-      fscanf(f, "\""); /* Read trailing double quote */
+      ret = fscanf(f, "\""); /* Read trailing double quote */
     }
 
     argv[n] = malloc((strlen(a)+1)*sizeof(char));
@@ -294,7 +294,8 @@ enc_params *parse_config_params(int argc, char **argv)
   add_param_to_list(&list, "-skip",                  "0", ARG_INTEGER,  &params->skip);
   add_param_to_list(&list, "-width",              "1920", ARG_INTEGER,  &params->width);
   add_param_to_list(&list, "-height",             "1080", ARG_INTEGER,  &params->height);
-  add_param_to_list(&list, "-qp",                   "32", ARG_INTEGER,  &params->qp);  
+  add_param_to_list(&list, "-qp",                   "32", ARG_INTEGER,  &params->qp);
+  add_param_to_list(&list, "-log2_sb_size",          "7", ARG_INTEGER,  &params->log2_sb_size);
   add_param_to_list(&list, "-f",                    "60", ARG_FLOAT,    &params->frame_rate);
   add_param_to_list(&list, "-lambda_coeffI",       "1.0", ARG_FLOAT,    &params->lambda_coeffI);
   add_param_to_list(&list, "-lambda_coeffP",       "1.0", ARG_FLOAT,    &params->lambda_coeffP);
@@ -332,7 +333,7 @@ enc_params *parse_config_params(int argc, char **argv)
   add_param_to_list(&list, "-encoder_speed",         "0", ARG_INTEGER,  &params->encoder_speed);
   add_param_to_list(&list, "-sync",                  "0", ARG_INTEGER,  &params->sync);
   add_param_to_list(&list, "-deblocking",            "1", ARG_INTEGER,  &params->deblocking);
-  add_param_to_list(&list, "-clpf",                  "1", ARG_INTEGER,  &params->clpf);
+  add_param_to_list(&list, "-clpf",                  "1", ARG_INTEGER,  &params->clpf); //0: off, 1: SB-level, 2: frame-level
   add_param_to_list(&list, "-snrcalc",               "1", ARG_INTEGER,  &params->snrcalc);
   add_param_to_list(&list, "-use_block_contexts",    "0", ARG_INTEGER,  &params->use_block_contexts);
   add_param_to_list(&list, "-enable_bipred",         "0", ARG_INTEGER,  &params->enable_bipred);
@@ -342,6 +343,7 @@ enc_params *parse_config_params(int argc, char **argv)
   add_param_to_list(&list, "-max_qpI",              "32", ARG_INTEGER,  &params->max_qpI);
   add_param_to_list(&list, "-min_qpI",              "32", ARG_INTEGER,  &params->min_qpI);
   add_param_to_list(&list, "-qmtx",                  "0", ARG_INTEGER,  &params->qmtx);
+  add_param_to_list(&list, "-qmtx_offset",           "0", ARG_INTEGER,  &params->qmtx_offset);// qp offset for qmlevel calculation -32 to 31
 
   /* Generate "argv" and "argc" for default parameters */
   default_argc = 1;
@@ -364,7 +366,7 @@ enc_params *parse_config_params(int argc, char **argv)
   /* Check if input file is y4m and if so use its geometry */
   if ((infile = fopen(params->infilestr, "rb"))) {
     char buf[256];
-    int len = fread(buf, 1, sizeof(buf), infile);
+    int len = (int)fread(buf, 1, sizeof(buf), infile);
     int pos = 10;
     int num, den;
     buf[255] = 0;
@@ -374,18 +376,18 @@ enc_params *parse_config_params(int argc, char **argv)
           switch (buf[pos++]) {
           case 'W':
             params->width = strtol(buf+pos, &end, 10);
-            pos = end-buf+1;
+            pos = (int)(end-buf+1);
             break;
           case 'H':
             params->height = strtol(buf+pos, &end, 10);
-            pos = end-buf+1;
+            pos = (int)(end-buf+1);
             break;
           case 'F':
             den = strtol(buf+pos, &end, 10);
-            pos = end-buf+1;
+            pos = (int)(end-buf+1);
             num = strtol(buf+pos, &end, 10);
-            pos = end-buf+1;
-            params->frame_rate = (double)den/num;
+            pos = (int)(end-buf+1);
+            params->frame_rate = (float)den/num;
             break;
           case 'I':
             if (buf[pos] != 'p') {
@@ -485,5 +487,13 @@ void check_parameters(enc_params *params)
 
   if (params->bitrate > 0 && params->num_reorder_pics > 0){
     fatalerror("Current rate control doesn't work with frame reordering\n");
+  }
+
+  if (params->log2_sb_size < 6 || params->log2_sb_size > MAX_SB_SIZE) {
+    fatalerror("Illegal value for log2_sb_size\n");
+  }
+
+  if (params->qmtx && (params->qmtx_offset < -32 || params->qmtx_offset>31)) {
+    fatalerror("qmtrx_offset must be a value from -32 to 31\n");
   }
 }

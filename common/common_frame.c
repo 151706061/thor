@@ -450,11 +450,11 @@ void create_yuv_frame(yuv_frame_t  *frame, int width, int height, int pad_ver_y,
   frame->v = frame->u + frame->area_c*sizeof(uint8_t);
 
   int align;
-  align = (16 - ((int64_t)frame->y)) & 15;
+  align = (16 - ((int)(uintptr_t)frame->y)) & 15;
   frame->offset_y += align;
   frame->y += align;
 
-  align = (16 - ((int64_t)frame->u)) & 15;
+  align = (16 - ((int)(uintptr_t)frame->u)) & 15;
   frame->offset_c += align;
   frame->u += align;
   frame->v += align;
@@ -592,74 +592,71 @@ void create_reference_frame(yuv_frame_t  *ref,yuv_frame_t  *rec)
 
 }
 
-void clpf_frame(yuv_frame_t *rec, yuv_frame_t *org, const deblock_data_t *deblock_data, void *stream,
-                int (*decision)(int, int, yuv_frame_t *, yuv_frame_t *, const deblock_data_t *, int, void *)) {
+void clpf_frame(yuv_frame_t *dst, yuv_frame_t *rec, yuv_frame_t *org, const deblock_data_t *deblock_data, void *stream, int enable_sb_flag, unsigned int strength, unsigned int fb_size_log2,
+                int(*decision)(int, int, yuv_frame_t *, yuv_frame_t *, const deblock_data_t *, int, int, int, void *, unsigned int, unsigned int)) {
 
   /* Constrained low-pass filter (CLPF) */
   int width = rec->width;
   int height = rec->height;
-  int xpos,ypos,index;
-  int k,l,m,n;
+  int xpos, ypos, index;
   int stride_y = rec->stride_y;
   int stride_c = rec->stride_c;
-  const int block_size = 8;
-  int num_sb_hor = width/MAX_BLOCK_SIZE;
-  int num_sb_ver = height/MAX_BLOCK_SIZE;
+  const int bs = 8;
 
-  for (k=0;k<num_sb_ver;k++){
-    for (l=0;l<num_sb_hor;l++){
-      int cand = 0;
+  int num_sb_hor = (width+(1<<fb_size_log2)-bs)>>fb_size_log2;
+  int num_sb_ver = (height+(1<<fb_size_log2)-bs)>>fb_size_log2;
 
-      for (m=0;m<MAX_BLOCK_SIZE/block_size;m++){
-        for (n=0;n<MAX_BLOCK_SIZE/block_size;n++){
-          xpos = l*MAX_BLOCK_SIZE + n*block_size;
-          ypos = k*MAX_BLOCK_SIZE + m*block_size;
-          index = (ypos/MIN_PB_SIZE)*(width/MIN_PB_SIZE) + (xpos/MIN_PB_SIZE);
-          cand |= deblock_data[index].mode != MODE_BIPRED &&
-            (deblock_data[index].cbp.y || deblock_data[index].cbp.u || deblock_data[index].cbp.v);
+  for (int k = 0; k < num_sb_ver; k++) {
+    for (int l = 0; l < num_sb_hor; l++) {
+      int allskip = 1;
+      for (int m = 0; allskip && m < (1<<fb_size_log2)/bs; m++) {
+        for (int n = 0; allskip && n < (1<<fb_size_log2)/bs; n++) {
+          xpos = (l<<fb_size_log2) + n*bs;
+          ypos = (k<<fb_size_log2) + m*bs;
+          if (xpos < width && ypos < height) {
+            index = (ypos/MIN_PB_SIZE)*(width/MIN_PB_SIZE) + (xpos/MIN_PB_SIZE);
+            allskip &= deblock_data[index].mode == MODE_SKIP;
+          }
         }
       }
-
-      if (cand && decision(k, l, rec, org, deblock_data, block_size, stream)) {
-        uint8_t tmp[MAX_BLOCK_SIZE*MAX_BLOCK_SIZE*3/2];
-        for (m=0; m<MAX_BLOCK_SIZE; m++)
-          memcpy(tmp + m*MAX_BLOCK_SIZE, rec->y + (k*MAX_BLOCK_SIZE+m)*stride_y + l*MAX_BLOCK_SIZE, MAX_BLOCK_SIZE);
-
-        for (m=0; m<MAX_BLOCK_SIZE/2; m++) {
-          memcpy(tmp+MAX_BLOCK_SIZE*MAX_BLOCK_SIZE + m*MAX_BLOCK_SIZE/2,
-                 rec->u + (k*MAX_BLOCK_SIZE/2+m)*stride_c + l*MAX_BLOCK_SIZE/2, MAX_BLOCK_SIZE/2);
-          memcpy(tmp+MAX_BLOCK_SIZE*MAX_BLOCK_SIZE*5/4 + m*MAX_BLOCK_SIZE/2,
-                 rec->v + (k*MAX_BLOCK_SIZE/2+m)*stride_c + l*MAX_BLOCK_SIZE/2, MAX_BLOCK_SIZE/2);
-        }
-
-        for (m=0;m<MAX_BLOCK_SIZE/block_size;m++){
-          for (n=0;n<MAX_BLOCK_SIZE/block_size;n++){
-            xpos = l*MAX_BLOCK_SIZE + n*block_size;
-            ypos = k*MAX_BLOCK_SIZE + m*block_size;
+      int h = min(height, (k+1)<<fb_size_log2) & ((1<<fb_size_log2)-1);
+      int w = min(width, (l+1)<<fb_size_log2) & ((1<<fb_size_log2)-1);
+      h += !h << fb_size_log2;
+      w += !w << fb_size_log2;
+      if (!allskip && (!enable_sb_flag || decision(k, l, rec, org, deblock_data, bs, w/bs, h/bs, stream, strength, fb_size_log2))) {
+        for (int m = 0; m < h/bs; m++) {
+          for (int n = 0; n < w/bs; n++) {
+            xpos = (l<<fb_size_log2) + n*bs;
+            ypos = (k<<fb_size_log2) + m*bs;
             index = (ypos/MIN_PB_SIZE)*(width/MIN_PB_SIZE) + (xpos/MIN_PB_SIZE);
-            int filter = deblock_data[index].mode != MODE_BIPRED;
+            int filter = deblock_data[index].mode != MODE_SKIP;
 
             if (filter) {
-              /* Y */
-              if (deblock_data[index].cbp.y)
-                (use_simd ? clpf_block_simd : clpf_block)(rec->y,tmp,stride_y,MAX_BLOCK_SIZE, xpos,ypos,block_size,width, height);
-
-              /* C */
-              if (deblock_data[index].cbp.u)
-                (use_simd ? clpf_block_simd : clpf_block)(rec->u,tmp+MAX_BLOCK_SIZE*MAX_BLOCK_SIZE,stride_c,MAX_BLOCK_SIZE/2,xpos/2,ypos/2,block_size/2,width/2,height/2);
-              if (deblock_data[index].cbp.v)
-                (use_simd ? clpf_block_simd : clpf_block)(rec->v,tmp+MAX_BLOCK_SIZE*MAX_BLOCK_SIZE*5/4,stride_c,MAX_BLOCK_SIZE/2,xpos/2,ypos/2,block_size/2,width/2,height/2);
+              (use_simd ? clpf_block_simd : clpf_block)(rec->y, dst->y, stride_y, xpos, ypos, bs, width, height, strength);
+              (use_simd ? clpf_block_simd : clpf_block)(rec->u, dst->u, stride_c, xpos / 2, ypos / 2, bs / 2, width / 2, height / 2, strength);
+              (use_simd ? clpf_block_simd : clpf_block)(rec->v, dst->v, stride_c, xpos / 2, ypos / 2, bs / 2, width / 2, height / 2, strength);
+            } else { // Copy
+              for (int c = 0; c < bs; c++)
+                *(uint64_t*)(dst->y + (ypos + c)*stride_y + xpos) =
+                  *(uint64_t*)(rec->y + (ypos + c)*stride_y + xpos);
+              for (int c = 0; c < bs/2; c++) {
+                *(uint32_t*)(dst->u + (ypos/2 + c)*stride_c + xpos/2) =
+                  *(uint32_t*)(rec->u + (ypos/2 + c)*stride_c + xpos/2);
+                *(uint32_t*)(dst->v + (ypos/2 + c)*stride_c + xpos/2) =
+                  *(uint32_t*)(rec->v + (ypos/2 + c)*stride_c + xpos/2);
+              }
             }
           }
         }
-        for (m=0; m<MAX_BLOCK_SIZE; m++)
-          memcpy(rec->y + (k*MAX_BLOCK_SIZE+m)*stride_y + l*MAX_BLOCK_SIZE, tmp + m*MAX_BLOCK_SIZE, MAX_BLOCK_SIZE);
-
-        for (m=0; m<MAX_BLOCK_SIZE/2; m++) {
-          memcpy(rec->u + (k*MAX_BLOCK_SIZE/2+m)*stride_c + l*MAX_BLOCK_SIZE/2,
-                 tmp+MAX_BLOCK_SIZE*MAX_BLOCK_SIZE + m*MAX_BLOCK_SIZE/2, MAX_BLOCK_SIZE/2);
-          memcpy(rec->v + (k*MAX_BLOCK_SIZE/2+m)*stride_c + l*MAX_BLOCK_SIZE/2,
-                 tmp+MAX_BLOCK_SIZE*MAX_BLOCK_SIZE*5/4 + m*MAX_BLOCK_SIZE/2, MAX_BLOCK_SIZE/2);
+      } else { // Copy
+        for (int m = 0; m < h; m++)
+          memcpy(dst->y + ((k<<fb_size_log2)+m)*stride_y + (l<<fb_size_log2),
+                 rec->y + ((k<<fb_size_log2)+m)*stride_y + (l<<fb_size_log2), w);
+        for (int m = 0; m < h/2; m++) {
+          memcpy(dst->u + ((k<<fb_size_log2)/2+m)*stride_c + (l<<fb_size_log2)/2,
+                 rec->u + ((k<<fb_size_log2)/2+m)*stride_c + (l<<fb_size_log2)/2, w/2);
+          memcpy(dst->v + ((k<<fb_size_log2)/2+m)*stride_c + (l<<fb_size_log2)/2,
+                 rec->v + ((k<<fb_size_log2)/2+m)*stride_c + (l<<fb_size_log2)/2, w/2);
         }
       }
     }

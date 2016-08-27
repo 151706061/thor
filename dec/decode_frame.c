@@ -32,15 +32,16 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "common_frame.h"
 #include "temporal_interp.h"
 #include "wt_matrix.h"
+#include "getvlc.h"
 
 extern int chroma_qp[52];
 
-static int clpf_true(int k, int l, yuv_frame_t *r, yuv_frame_t *o, const deblock_data_t *d, int s, void *stream) {
+static int clpf_true(int k, int l, yuv_frame_t *r, yuv_frame_t *o, const deblock_data_t *d, int s, int w, int h, void *stream, unsigned int strength, unsigned int fb_size_log2) {
   return 1;
 }
 
-static int clpf_bit(int k, int l, yuv_frame_t *r, yuv_frame_t *o, const deblock_data_t *d, int s, void *stream) {
-  return getbits((stream_t*)stream, 1);
+static int clpf_bit(int k, int l, yuv_frame_t *r, yuv_frame_t *o, const deblock_data_t *d, int s, int w, int h, void *stream, unsigned int strength, unsigned int fb_size_log2) {
+  return get_flc(1, (stream_t*)stream);
 }
 
 void decode_frame(decoder_info_t *decoder_info, yuv_frame_t* rec_buffer)
@@ -48,36 +49,37 @@ void decode_frame(decoder_info_t *decoder_info, yuv_frame_t* rec_buffer)
   int height = decoder_info->height;
   int width = decoder_info->width;
   int k,l,r;
-  int num_sb_hor = (width + MAX_BLOCK_SIZE - 1)/MAX_BLOCK_SIZE;
-  int num_sb_ver = (height + MAX_BLOCK_SIZE - 1)/MAX_BLOCK_SIZE;
+  int sb_size = 1 << decoder_info->log2_sb_size;
+  int num_sb_hor = (width + sb_size - 1) / sb_size;
+  int num_sb_ver = (height + sb_size - 1) / sb_size;
   stream_t *stream = decoder_info->stream;
   memset(decoder_info->deblock_data, 0, ((height/MIN_PB_SIZE) * (width/MIN_PB_SIZE) * sizeof(deblock_data_t)) );
 
   int bit_start = stream->bitcnt;
   int rec_buffer_idx;
 
-  decoder_info->frame_info.frame_type = getbits(stream,1);
+  decoder_info->frame_info.frame_type = get_flc(1, stream);
   decoder_info->bit_count.stat_frame_type = decoder_info->frame_info.frame_type;
-  int qp = getbits(stream,8);
+  int qp = get_flc(8, stream);
 
-  decoder_info->frame_info.num_intra_modes = getbits(stream,4);
+  decoder_info->frame_info.num_intra_modes = get_flc(4, stream);
 
   decoder_info->frame_info.interp_ref = 0;
   if (decoder_info->frame_info.frame_type != I_FRAME) {
-    decoder_info->frame_info.num_ref = getbits(stream,2)+1;
+    decoder_info->frame_info.num_ref = get_flc(2, stream)+1;
     int r;
     for (r=0;r<decoder_info->frame_info.num_ref;r++){
-      decoder_info->frame_info.ref_array[r] = getbits(stream,6)-1;
+      decoder_info->frame_info.ref_array[r] = get_flc(6, stream)-1;
       if (decoder_info->frame_info.ref_array[r]==-1)
         decoder_info->frame_info.interp_ref = 1;
     }
     if (decoder_info->frame_info.num_ref==2 && decoder_info->frame_info.ref_array[0]==-1) {
-      decoder_info->frame_info.ref_array[decoder_info->frame_info.num_ref++] = getbits(stream,5)-1;
+      decoder_info->frame_info.ref_array[decoder_info->frame_info.num_ref++] = get_flc(5, stream)-1;
     }
   } else {
     decoder_info->frame_info.num_ref = 0;
   }
-  decoder_info->frame_info.display_frame_num = getbits(stream,16);
+  decoder_info->frame_info.display_frame_num = get_flc(16, stream);
   for (r=0; r<decoder_info->frame_info.num_ref; ++r){
     if (decoder_info->frame_info.ref_array[r]!=-1) {
       if (decoder_info->ref[decoder_info->frame_info.ref_array[r]]->frame_num > decoder_info->frame_info.display_frame_num) {
@@ -88,6 +90,7 @@ void decode_frame(decoder_info_t *decoder_info, yuv_frame_t* rec_buffer)
 
   rec_buffer_idx = decoder_info->frame_info.display_frame_num%MAX_REORDER_BUFFER;
   decoder_info->rec = &rec_buffer[rec_buffer_idx];
+  decoder_info->tmp = &rec_buffer[MAX_REORDER_BUFFER];
   decoder_info->rec->frame_num = decoder_info->frame_info.display_frame_num;
 
   if (decoder_info->frame_info.num_ref>2 && decoder_info->frame_info.ref_array[0]==-1) {
@@ -117,9 +120,9 @@ void decode_frame(decoder_info_t *decoder_info, yuv_frame_t* rec_buffer)
 
   for (k=0;k<num_sb_ver;k++){
     for (l=0;l<num_sb_hor;l++){
-      int xposY = l*MAX_BLOCK_SIZE;
-      int yposY = k*MAX_BLOCK_SIZE;
-      process_block_dec(decoder_info,MAX_BLOCK_SIZE,yposY,xposY);
+      int xposY = l*sb_size;
+      int yposY = k*sb_size;
+      process_block_dec(decoder_info, sb_size, yposY, xposY);
     }
   }
 
@@ -131,9 +134,19 @@ void decode_frame(decoder_info_t *decoder_info, yuv_frame_t* rec_buffer)
     deblock_frame_uv(decoder_info->rec, decoder_info->deblock_data, width, height, qpc);
   }
 
-  if (decoder_info->clpf && getbits(stream, 1)){
-    clpf_frame(decoder_info->rec, 0, decoder_info->deblock_data, stream,
-               getbits(stream, 1) ? clpf_true : clpf_bit);
+  if (decoder_info->clpf) {
+    int strength = get_flc(2, stream);
+    if (strength) {
+      int fb_size_log2 = get_flc(2, stream) + 4;
+      int enable_fb_flag = fb_size_log2 != 4;
+      if (fb_size_log2 == 4)
+        fb_size_log2 = 7;
+      yuv_frame_t tmp = *decoder_info->rec;
+      clpf_frame(decoder_info->tmp, decoder_info->rec, 0, decoder_info->deblock_data, stream, enable_fb_flag, strength + (strength == 3), fb_size_log2, enable_fb_flag ? clpf_bit : clpf_true);
+      *decoder_info->rec = *decoder_info->tmp;
+      *decoder_info->tmp = tmp;
+      decoder_info->rec->frame_num = tmp.frame_num;
+    }
   }
 
   /* Sliding window operation for reference frame buffer by circular buffer */

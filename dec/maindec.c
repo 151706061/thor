@@ -36,7 +36,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "maindec.h"
 #include "decode_frame.h"
 #include "common_frame.h"
-#include "getbits.h"
+#include "getvlc.h"
 #include "../common/simd.h"
 #include "wt_matrix.h"
 
@@ -94,7 +94,7 @@ int main(int argc, char** argv)
     FILE *infile,*outfile;
     decoder_info_t decoder_info;
     stream_t stream;
-    yuv_frame_t rec[MAX_REORDER_BUFFER];
+    yuv_frame_t rec[MAX_REORDER_BUFFER+1];  // Last is for temp use
     yuv_frame_t ref[MAX_REF_FRAMES];
     int rec_available[MAX_REORDER_BUFFER]={0};
     int rec_buffer_idx;
@@ -122,39 +122,39 @@ int main(int argc, char** argv)
 
     int bit_start = stream.bitcnt;
     /* Read sequence header */
-    width = getbits(&stream,16);
-    height = getbits(&stream,16);
+    width = get_flc(16, &stream);
+    height = get_flc(16, &stream);
 
     decoder_info.width = width;
     decoder_info.height = height;
     printf("width=%4d height=%4d\n",width,height);
 
-    decoder_info.pb_split = getbits(&stream,1);
+    decoder_info.log2_sb_size = get_flc(3, &stream);
+
+    decoder_info.pb_split = get_flc(1, &stream);
     printf("pb_split_enable=%1d\n",decoder_info.pb_split); //TODO: Rename variable to pb_split_enable
 
-    decoder_info.tb_split_enable = getbits(&stream,1);
+    decoder_info.tb_split_enable = get_flc(1, &stream);
     printf("tb_split_enable=%1d\n",decoder_info.tb_split_enable);
 
-    decoder_info.max_num_ref = getbits(&stream,2) + 1;
+    decoder_info.max_num_ref = get_flc(2, &stream) + 1;
     fprintf(stderr,"num refs is %d\n",decoder_info.max_num_ref);
 
-    decoder_info.interp_ref = getbits(&stream,1);
-    decoder_info.max_delta_qp = getbits(&stream, 1);
-    decoder_info.deblocking = getbits(&stream,1);
-    decoder_info.clpf = getbits(&stream,1);
-    decoder_info.use_block_contexts = getbits(&stream,1);
-    decoder_info.bipred = getbits(&stream,1);
-    decoder_info.qmtx = getbits(&stream,1);
-    printf("use quant matrix = %d\n", decoder_info.qmtx);
-
+    decoder_info.interp_ref = get_flc(1, &stream);
+    decoder_info.max_delta_qp = get_flc(1, &stream);
+    decoder_info.deblocking = get_flc(1, &stream);
+    decoder_info.clpf = get_flc(1, &stream);
+    decoder_info.use_block_contexts = get_flc(1, &stream);
+    decoder_info.bipred = get_flc(1, &stream);
+    decoder_info.qmtx = get_flc(1, &stream);
     if (decoder_info.qmtx){
-      alloc_wmatrices(decoder_info.iwmatrix);
-      make_wmatrices(NULL /*only for enc*/, decoder_info.iwmatrix);
+      decoder_info.qmtx_offset = get_flc(6, &stream) - 32;
+      alloc_wmatrices(decoder_info.iwmatrix, 1);
     }
 
     decoder_info.bit_count.sequence_header += (stream.bitcnt - bit_start);
 
-    for (r=0;r<MAX_REORDER_BUFFER;r++){
+    for (r=0;r<MAX_REORDER_BUFFER+1;r++){
       create_yuv_frame(&rec[r],width,height,0,0,0,0);
     }
     for (r=0;r<MAX_REF_FRAMES;r++){
@@ -253,6 +253,7 @@ int main(int argc, char** argv)
     printf("16x16-blocks (8x8):    %9d  %9d  %9d  %9d  %9d  %9d\n",bit_count.size[0][1],bit_count.size[0][1]/ni,bit_count.size[1][1],bit_count.size[1][1]/np,bit_count.size[2][1],bit_count.size[2][1]/nb);
     printf("32x32-blocks (8x8):    %9d  %9d  %9d  %9d  %9d  %9d\n",bit_count.size[0][2],bit_count.size[0][2]/ni,bit_count.size[1][2],bit_count.size[1][2]/np,bit_count.size[2][2],bit_count.size[2][2]/nb);
     printf("64x64-blocks (8x8):    %9d  %9d  %9d  %9d  %9d  %9d\n",bit_count.size[0][3],bit_count.size[0][3]/ni,bit_count.size[1][3],bit_count.size[1][3]/np,bit_count.size[2][3],bit_count.size[2][3]/nb);
+    printf("128x128-blocks (8x8):  %9d  %9d  %9d  %9d  %9d  %9d\n",bit_count.size[0][4],bit_count.size[0][4]/ni,bit_count.size[1][4],bit_count.size[1][4]/np,bit_count.size[2][4],bit_count.size[2][4]/nb);
 
     printf("\n");
     printf("Mode and size distribution for P pictures:\n");
@@ -261,6 +262,8 @@ int main(int argc, char** argv)
     printf("16x16-blocks (8x8):    %9d  %9d  %9d  %9d  %9d\n",bit_count.size_and_mode[P_FRAME][1][0],bit_count.size_and_mode[P_FRAME][1][1],bit_count.size_and_mode[P_FRAME][1][2],bit_count.size_and_mode[P_FRAME][1][3],bit_count.size_and_mode[P_FRAME][1][4]);
     printf("32x32-blocks (8x8):    %9d  %9d  %9d  %9d  %9d\n",bit_count.size_and_mode[P_FRAME][2][0],bit_count.size_and_mode[P_FRAME][2][1],bit_count.size_and_mode[P_FRAME][2][2],bit_count.size_and_mode[P_FRAME][2][3],bit_count.size_and_mode[P_FRAME][2][4]);
     printf("64x64-blocks (8x8):    %9d  %9d  %9d  %9d  %9d\n",bit_count.size_and_mode[P_FRAME][3][0],bit_count.size_and_mode[P_FRAME][3][1],bit_count.size_and_mode[P_FRAME][3][2],bit_count.size_and_mode[P_FRAME][3][3],bit_count.size_and_mode[P_FRAME][3][4]);
+    printf("128x128-blocks (8x8):  %9d  %9d  %9d  %9d  %9d\n",bit_count.size_and_mode[P_FRAME][4][0],bit_count.size_and_mode[P_FRAME][4][1],bit_count.size_and_mode[P_FRAME][4][2],bit_count.size_and_mode[P_FRAME][4][3],bit_count.size_and_mode[P_FRAME][4][4]);
+
 
     printf("\n");
     printf("Mode and size distribution for B pictures:\n");
@@ -269,6 +272,7 @@ int main(int argc, char** argv)
     printf("16x16-blocks (8x8):    %9d  %9d  %9d  %9d  %9d\n", bit_count.size_and_mode[B_FRAME][1][0], bit_count.size_and_mode[B_FRAME][1][1], bit_count.size_and_mode[B_FRAME][1][2], bit_count.size_and_mode[B_FRAME][1][3], bit_count.size_and_mode[B_FRAME][1][4]);
     printf("32x32-blocks (8x8):    %9d  %9d  %9d  %9d  %9d\n", bit_count.size_and_mode[B_FRAME][2][0], bit_count.size_and_mode[B_FRAME][2][1], bit_count.size_and_mode[B_FRAME][2][2], bit_count.size_and_mode[B_FRAME][2][3], bit_count.size_and_mode[B_FRAME][2][4]);
     printf("64x64-blocks (8x8):    %9d  %9d  %9d  %9d  %9d\n", bit_count.size_and_mode[B_FRAME][3][0], bit_count.size_and_mode[B_FRAME][3][1], bit_count.size_and_mode[B_FRAME][3][2], bit_count.size_and_mode[B_FRAME][3][3], bit_count.size_and_mode[B_FRAME][3][4]);
+    printf("128x128-blocks (8x8):  %9d  %9d  %9d  %9d  %9d\n", bit_count.size_and_mode[B_FRAME][4][0], bit_count.size_and_mode[B_FRAME][4][1], bit_count.size_and_mode[B_FRAME][4][2], bit_count.size_and_mode[B_FRAME][4][3], bit_count.size_and_mode[B_FRAME][4][4]);
 
     int idx;
     int num = 5 + decoder_info.max_num_ref;
@@ -278,7 +282,7 @@ int main(int argc, char** argv)
     printf("\n");
     for (idx=0;idx<NUM_BLOCK_SIZES;idx++){
       int size = 8<<idx;
-      printf("%2d x %2d-blocks: ",size,size);
+      printf("%3d x %3d-blocks: ",size,size);
       for (i=0;i<num;i++){
         printf("%8d",bit_count.super_mode_stat[P_FRAME][idx][i]);
       }
@@ -291,7 +295,7 @@ int main(int argc, char** argv)
     printf("\n");
     for (idx = 0; idx<NUM_BLOCK_SIZES; idx++) {
       int size = 8 << idx;
-      printf("%2d x %2d-blocks: ", size, size);
+      printf("%3d x %3d-blocks: ", size, size);
       for (i = 0; i<num; i++) {
         printf("%8d", bit_count.super_mode_stat[B_FRAME][idx][i]);
       }
@@ -304,7 +308,7 @@ int main(int argc, char** argv)
     printf("Ref_idx and size distribution for P pictures:\n");
     for (i=0;i<NUM_BLOCK_SIZES;i++){
       size = 1<<(i+3);
-      printf("%2d x %2d-blocks: ",size,size);
+      printf("%3d x %3d-blocks: ",size,size);
       for (j=0;j<decoder_info.max_num_ref;j++){
         printf("%6d",bit_count.size_and_ref_idx[P_FRAME][i][j]);
       }
@@ -315,7 +319,7 @@ int main(int argc, char** argv)
     printf("Ref_idx and size distribution for B pictures:\n");
     for (i = 0; i<NUM_BLOCK_SIZES; i++) {
       size = 1 << (i + 3);
-      printf("%2d x %2d-blocks: ", size, size);
+      printf("%3d x %3d-blocks: ", size, size);
       for (j = 0; j<decoder_info.max_num_ref; j++) {
         printf("%6d", bit_count.size_and_ref_idx[B_FRAME][i][j]);
       }
@@ -333,14 +337,11 @@ int main(int argc, char** argv)
     }
     printf("\n");
     printf("-----------------------------------------------------------------\n");
-    for (r=0;r<MAX_REORDER_BUFFER;r++){
+    for (r=0;r<MAX_REORDER_BUFFER+1;r++){
       close_yuv_frame(&rec[r]);
     }
     for (r=0;r<MAX_REF_FRAMES;r++){
       close_yuv_frame(&ref[r]);
-    }
-    if (decoder_info.qmtx){
-      free_wmatrices(decoder_info.iwmatrix);
     }
     if (decoder_info.interp_ref) {
       for (r=0;r<MAX_SKIP_FRAMES;r++){
@@ -350,6 +351,10 @@ int main(int argc, char** argv)
     }
 
     free(decoder_info.deblock_data);
+    if (infile)
+      fclose(infile);
+    if (outfile)
+      fclose(outfile);
 
     return 0;
 }
